@@ -6,9 +6,11 @@
 
 mp3stream="lame preset=medium"
 aacstream="faac bitrate=64000 ! ffmux_mp4"
+oggstream="vorbisenc quality=2 ! oggmux"
 usenero=""
 stream=""
 extension=""
+albumart=""
 
 function VERSION ()
 {
@@ -24,12 +26,13 @@ function USAGE ()
 {
     echo ""
     echo "USAGE: "
-    echo "    ${0/*\/} [-n|-s|-x] <from> <to>"
+    echo "    ${0/*\/} [-n|-s|-x|-a] <from> <to>"
     echo ""
     echo "OPTIONS:"
     echo "    -s <stream>    Specify custom gstreamer pipeline"
     echo "    -x <extension> Specify filename extension (default mp3)"
     echo "    -n             Use the Nero HE-AAC encoder (requires FLAC inputs for now)"
+    echo "    -a <filename>  Specify album art filename (default cover.jpg)"
     echo "    <from>         Specify source path for files"
     echo "    <to>           Specify destination path for files"
     echo "    -h             This usage information"
@@ -41,10 +44,11 @@ function USAGE ()
     exit $E_OPTERROR    # Exit and explain usage, if no argument(s) given.
 }
 
-while getopts "ns:x:hv" Option
+while getopts "ns:a:x:hv" Option
 do
     case $Option in
         n    ) usenero=1;;
+        a    ) albumart="$OPTARG";;
         x    ) extension="$OPTARG";;
         s    ) stream="$OPTARG";;
         v    ) VERSION
@@ -75,6 +79,8 @@ fi
 if [[ -z "$stream" ]]; then
 	if [[ "$extension" == "m4a" ]] || [[ "$extension" == "aac" ]]; then
 		stream="$aacstream"
+	elif [[ "$extension" == "ogg" ]] || [[ "$extension" == "vorbis" ]]; then
+		stream="$oggstream"
 	else
 		stream="$mp3stream"
 	fi
@@ -112,6 +118,7 @@ needsDoing () {
 
 
 lockfile="$dest/.lock"
+mkdir -p "$dest"
 function lock ()
 {
 	while [[ 1 ]]
@@ -137,17 +144,41 @@ function unlock ()
 cd $source
 printf "Searching..."
 
+declare -a missingart;
+
 lock 2> /dev/null
 while read s
 do
+	COLUMNS=`tput cols`
 	needsDoing "$s"
 	if [[ -n "$ndd" ]]
 	then
 		sources[${#sources[@]}]="$s"
-		printf "\rSearching: %7s: %-55.55s" ${#sources[@]} "$s"
+		nnfw=$((11 + 7 + 2))
+		nfw=$(( (COLUMNS > nnfw) ? COLUMNS - nnfw : 0))
+		printf "Searching: %7s: %-${nfw}.${nfw}s\r" ${#sources[@]} "$s"
+	fi
+	
+	path="${s%/*}"
+	if [[ -n "$albumart" ]] && [[ ! -e "$path/$albumart" ]]
+	then
+		entries=${#missingart[@]}
+		if [[ $entries -lt 1 ]] || [[ "${missingart[ $(( entries - 1 )) ]}" != "$path" ]]
+		then
+			missingart[$entries]="$path"
+		fi
 	fi
 done < <( find . -regextype posix-extended -iregex "$filter" )
 unlock
+
+if [[ ${#missingart[@]} -gt 0 ]]
+then
+	printf "\nMissing album art in:%-*.*s\n" $((COLUMNS - 22)) $((COLUMNS - 22)) ""
+	for m in "${missingart[@]}"
+	do
+		printf "%-*.*s\n" $((COLUMNS)) $((COLUMNS)) "$m"
+	done
+fi
 
 shopt -s extglob
 
@@ -186,13 +217,16 @@ do
 
 	(( i >= total )) && break
 
-	printf "\rEncoding: %${#total}s/$total: %-55.55s" $i "$s"
+	COLUMNS=`tput cols`
+	nnfw=$((10 + 2 * ${#total} + 1 + 2))
+	nfw=$(( (COLUMNS > nnfw) ? COLUMNS - nnfw : 0))
+	printf "Encoding: %${#total}s/$total: %-*.*s\r" $i $nfw $nfw "$s"
 	if [[ -n "$usenero" ]]
 	then
 		incoming="$dest/.incoming-$$.mp4"
 		mknod "/tmp/p-$$" p
 		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! audioconvert ! wavenc ! filesink "location=/tmp/p-$$" 1>/dev/null 2>/dev/null &
-		nice -n 19 neroAacEnc -q 0.15 -if "/tmp/p-$$" -of "$incoming" 1>/dev/null 2>/tmp/.sync-out-$$ && 
+		nice -n 19 neroAacEnc -q 0.3 -if "/tmp/p-$$" -of "$incoming" 1>/dev/null 2>/tmp/.sync-out-$$ && 
 		nice -n 19 metaflac --export-tags-to=- "$s" | while read tag
 		do
 			echo -n -
@@ -222,7 +256,7 @@ do
 	
 	rm -f /tmp/.sync-out-$$
 	
-	[[ ! -e "${d%/*}/cover.jpg" ]] && [[ -e "${s%/*}/cover.jpg" ]] && cp "${s%/*}/cover.jpg" "${d%/*}"
+	[[ ! -e "${d%/*}/$albumart" ]] && [[ -e "${s%/*}/$albumart" ]] && cp "${s%/*}/$albumart" "${d%/*}"
 
 	(( i++ ))
 done
