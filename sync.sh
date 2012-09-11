@@ -6,7 +6,7 @@
 
 mp3stream="lame preset=medium"
 aacstream="faac bitrate=64000 ! ffmux_mp4"
-usenero=0
+usenero=""
 stream=""
 extension=""
 
@@ -61,19 +61,19 @@ shift $(($OPTIND - 1))
 source="$1"
 dest="$2"
 
-if [[ "x$source" == "x" ]]; then USAGE; fi
-if [[ "x$dest" == "x" ]]; then USAGE; fi
+if [[ -z "$source" ]]; then USAGE; fi
+if [[ -z "$dest" ]]; then USAGE; fi
 
-if [[ "x$extension" == "x" ]]; then
-	if [[ $usenero -gt 0 ]]; then
+if [[ -z "$extension" ]]; then
+	if [[ -n "$usenero" ]]; then
 		extension=mp4
 	else
 		extension=mp3
 	fi
 fi
 
-if [[ "x$stream" == "x" ]]; then
-	if [[ "$extension" == "m4a" || "$extension" == "aac" ]]; then
+if [[ -z "$stream" ]]; then
+	if [[ "$extension" == "m4a" ]] || [[ "$extension" == "aac" ]]; then
 		stream="$aacstream"
 	else
 		stream="$mp3stream"
@@ -83,48 +83,148 @@ fi
 filter=".*(flac|mp3|aac|m4a|mp2|ogg|vorbis|wav|mkv)"
 
 declare -a sources
+havePid () { ps ax -o pid --no-heading | grep "^ *$1\$" >/dev/null; }
+
+ndd=""
+dotndd=""
+
+#Returns value into ndd/dotndd.
+needsDoing () {
+ndd="$dest/${1%.*}.$extension"
+if [[ -e "$ndd" ]]
+then
+# Already converted.
+ndd=""
+else
+dotndd="$dest/${1%.*}.$extension~"
+# Not yet converted.
+if [[ -e "$dotndd" ]] && havePid `cat "$dotndd"`
+then
+# Current process is converting it. Leave well alone.
+ndd=""
+dotndd=""
+else
+# Not started or old process was converting but interrupted.
+rm -f "$dotndd" 2> /dev/null
+fi
+fi
+}
+
+
+lockfile="$dest/.lock"
+function lock ()
+{
+while [[ 1 ]]
+do
+echo $$ > "$lockfile"
+chmod -w "$lockfile"
+lfc=`cat "$lockfile"`
+if [[ $$ == $lfc ]]
+then
+break
+fi
+if ! havePid $lfc 
+then
+rm -f "$lockfile"
+else
+sleep 0.01
+fi
+done
+}
+
+function unlock ()
+{
+rm -f "$lockfile"
+}
 
 cd $source
 printf "Searching..."
+
+lock 2> /dev/null
 while read s
 do
-	if [[ ! -e "$dest/${s%.*}.$extension" ]]
+	needsDoing "$s"
+	if [[ -n "$ndd" ]]
 	then
 		sources[${#sources[@]}]="$s"
+		printf "\rSearching: %7s: %-55.55s" ${#sources[@]} "$s"
 	fi
 done < <( find . -regextype posix-extended -iregex "$filter" )
-
+unlock
 
 shopt -s extglob
 
 total=${#sources[@]}
-for (( i = 0 ; i < total ; i++ ))
+incoming=""
+s=""
+d=""
+dotd=""
+i=0
+while (( i < total ))
 do
-	s="${sources[$i]}"
-	d="$dest/${s%.*}.$extension"
-	mkdir -p "${d%/*}"
-	printf "\rEncoding: %6s/$total" $i
-	incoming="$dest/.incoming"
-	if [[ $usenero -gt 0 ]] ; then
-		incoming="$dest/.incoming.mp4"
+# START CRITICAL
+	if [[ -n "$incoming" ]] && [[ -n "$d" ]]
+	then
+		mv "$incoming" "$d"
+	fi
+	
+	lock 2>/dev/null
+	if [[ -n "$dotd" ]]
+	then
+		rm -f "$dotd"
+	fi
+	
+	for (( ; i < total; i++ ))
+	do
+		s="${sources[$i]}"
+		needsDoing "$s"
+		d="$ndd"
+		dotd="$dotndd"
+		
+		if [[ -n "$d" ]]
+		then
+			mkdir -p "${d%/*}"
+			echo $$ > "$dotd"
+			break
+		fi
+	done
+	
+	unlock 2>/dev/null
+# END CRITICAL
+
+	if (( i == total )) ; then break; fi
+
+	printf "\rEncoding: %${#total}s/$total: %-55.55s" $i "$s"
+	if [[ -n "$usenero" ]] ; then
+		incoming="$dest/.incoming-$$.mp4"
 		mknod "/tmp/p-$$" p
 		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! wavenc ! filesink "location=/tmp/p-$$" 1>/dev/null 2>/dev/null &
 		nice -n 19 neroAacEnc -q 0.15 -if "/tmp/p-$$" -of "$incoming" 1>/dev/null 2>/tmp/.sync-out-$$ && 
 		nice -n 19 metaflac --export-tags-to=- "$s" | while read tag; do echo -n - && printf "meta-user:$tag\0"; done | xargs -0 neroAacTag "$incoming" 1>/dev/null 2>/dev/null
 		rm -f "/tmp/p-$$"
 	else
+		incoming="$dest/.incoming-$$"
 		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! $stream ! id3v2mux ! filesink "location=$incoming" >/tmp/.sync-out-$$ 2>/dev/null
 	fi
 	
-	[[ `grep Interrupt /tmp/.sync-out-$$` ]] && { echo ""; echo "Interrupted."; rm -f /tmp/.sync-out-$$; exit; }
+	if [[ `grep Interrupt /tmp/.sync-out-$$` ]]
+	then
+		echo ""
+		echo "Interrupted."
+		rm -f /tmp/.sync-out-$$
+		rm -f "$incoming"
+		rm -f "$dotd"
+		exit
+	fi
 	
 	rm -f /tmp/.sync-out-$$
-	mv "$incoming" "$d"
 	
 	if [[ ! -e "${d%/*}/cover.jpg" && -e "${s%/*}/cover.jpg" ]]
 	then
 		cp "${s%/*}/cover.jpg" "${d%/*}"
 	fi
+
+	(( i++ ))
 done
 
 echo ""
