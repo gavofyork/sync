@@ -191,7 +191,7 @@ do
 	then
 		incoming="$dest/.incoming-$$.mp4"
 		mknod "/tmp/p-$$" p
-		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! wavenc ! filesink "location=/tmp/p-$$" 1>/dev/null 2>/dev/null &
+		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! audioconvert ! wavenc ! filesink "location=/tmp/p-$$" 1>/dev/null 2>/dev/null &
 		nice -n 19 neroAacEnc -q 0.15 -if "/tmp/p-$$" -of "$incoming" 1>/dev/null 2>/tmp/.sync-out-$$ && 
 		nice -n 19 metaflac --export-tags-to=- "$s" | while read tag
 		do
@@ -207,7 +207,7 @@ do
 		rm -f "/tmp/p-$$"
 	else
 		incoming="$dest/.incoming-$$"
-		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! $stream ! id3v2mux ! filesink "location=$incoming" >/tmp/.sync-out-$$ 2>/dev/null
+		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! audioconvert ! $stream ! id3v2mux ! filesink "location=$incoming" >/tmp/.sync-out-$$ 2>/dev/null
 	fi
 	
 	if [[ `grep Interrupt /tmp/.sync-out-$$` ]]
