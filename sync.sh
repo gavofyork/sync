@@ -61,8 +61,8 @@ shift $(($OPTIND - 1))
 source="$1"
 dest="$2"
 
-if [[ -z "$source" ]]; then USAGE; fi
-if [[ -z "$dest" ]]; then USAGE; fi
+[[ -z "$source" ]] && USAGE
+[[ -z "$dest" ]] && USAGE
 
 if [[ -z "$extension" ]]; then
 	if [[ -n "$usenero" ]]; then
@@ -90,51 +90,48 @@ dotndd=""
 
 #Returns value into ndd/dotndd.
 needsDoing () {
-ndd="$dest/${1%.*}.$extension"
-if [[ -e "$ndd" ]]
-then
-# Already converted.
-ndd=""
-else
-dotndd="$dest/${1%.*}.$extension~"
-# Not yet converted.
-if [[ -e "$dotndd" ]] && havePid `cat "$dotndd"`
-then
-# Current process is converting it. Leave well alone.
-ndd=""
-dotndd=""
-else
-# Not started or old process was converting but interrupted.
-rm -f "$dotndd" 2> /dev/null
-fi
-fi
+	ndd="$dest/${1%.*}.$extension"
+	if [[ -e "$ndd" ]]
+	then
+		# Already converted.
+		ndd=""
+	else
+		dotndd="$dest/${1%.*}.$extension~"
+		# Not yet converted.
+		if [[ -e "$dotndd" ]] && havePid `cat "$dotndd"`
+		then
+			# Current process is converting it. Leave well alone.
+			ndd=""
+			dotndd=""
+		else
+			# Not started or old process was converting but interrupted.
+			rm -f "$dotndd" 2> /dev/null
+		fi
+	fi
 }
 
 
 lockfile="$dest/.lock"
 function lock ()
 {
-while [[ 1 ]]
-do
-echo $$ > "$lockfile"
-chmod -w "$lockfile"
-lfc=`cat "$lockfile"`
-if [[ $$ == $lfc ]]
-then
-break
-fi
-if ! havePid $lfc 
-then
-rm -f "$lockfile"
-else
-sleep 0.01
-fi
-done
+	while [[ 1 ]]
+	do
+		echo $$ > "$lockfile"
+		chmod -w "$lockfile"
+		lfc=`cat "$lockfile"`
+		[[ $$ == $lfc ]] && break
+		if ! havePid $lfc 
+		then
+			rm -f "$lockfile"
+		else
+			sleep 0.01
+		fi
+	done
 }
 
 function unlock ()
 {
-rm -f "$lockfile"
+	rm -f "$lockfile"
 }
 
 cd $source
@@ -160,19 +157,14 @@ s=""
 d=""
 dotd=""
 i=0
-while (( i < total ))
+while [[ 1 ]]
 do
-# START CRITICAL
-	if [[ -n "$incoming" ]] && [[ -n "$d" ]]
-	then
-		mv "$incoming" "$d"
-	fi
+	[[ -n "$incoming" ]] && [[ -n "$d" ]] && mv "$incoming" "$d"
 	
+# START CRITICAL
 	lock 2>/dev/null
-	if [[ -n "$dotd" ]]
-	then
-		rm -f "$dotd"
-	fi
+
+	[[ -n "$dotd" ]] && rm -f "$dotd"
 	
 	for (( ; i < total; i++ ))
 	do
@@ -192,15 +184,26 @@ do
 	unlock 2>/dev/null
 # END CRITICAL
 
-	if (( i == total )) ; then break; fi
+	(( i >= total )) && break
 
 	printf "\rEncoding: %${#total}s/$total: %-55.55s" $i "$s"
-	if [[ -n "$usenero" ]] ; then
+	if [[ -n "$usenero" ]]
+	then
 		incoming="$dest/.incoming-$$.mp4"
 		mknod "/tmp/p-$$" p
 		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! wavenc ! filesink "location=/tmp/p-$$" 1>/dev/null 2>/dev/null &
 		nice -n 19 neroAacEnc -q 0.15 -if "/tmp/p-$$" -of "$incoming" 1>/dev/null 2>/tmp/.sync-out-$$ && 
-		nice -n 19 metaflac --export-tags-to=- "$s" | while read tag; do echo -n - && printf "meta-user:$tag\0"; done | xargs -0 neroAacTag "$incoming" 1>/dev/null 2>/dev/null
+		nice -n 19 metaflac --export-tags-to=- "$s" | while read tag
+		do
+			echo -n -
+			printf "meta-user:%s\0" "$tag"
+			n="${m/=*}"
+			v="${m/*=}"
+# Fix-ups for iTunes. UNTESTED
+			[[ "$n" == "compilation" ]] && echo -n - && printf "meta-user:itunescompilation=%s\0" "$v"
+			[[ "$n" == "tracktotal" ]] && echo -n - && printf "meta-user:totaltracks=%s\0" "$v"
+			[[ "$n" == "disctotal" ]] && echo -n - && printf "meta-user:totaldiscs=%s\0" "$v"
+		done | xargs -0 neroAacTag "$incoming" 1>/dev/null 2>/dev/null
 		rm -f "/tmp/p-$$"
 	else
 		incoming="$dest/.incoming-$$"
@@ -219,10 +222,7 @@ do
 	
 	rm -f /tmp/.sync-out-$$
 	
-	if [[ ! -e "${d%/*}/cover.jpg" && -e "${s%/*}/cover.jpg" ]]
-	then
-		cp "${s%/*}/cover.jpg" "${d%/*}"
-	fi
+	[[ ! -e "${d%/*}/cover.jpg" ]] && [[ -e "${s%/*}/cover.jpg" ]] && cp "${s%/*}/cover.jpg" "${d%/*}"
 
 	(( i++ ))
 done
