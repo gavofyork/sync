@@ -8,6 +8,7 @@ mp3stream="lame preset=medium"
 aacstream="faac bitrate=64000 ! ffmux_mp4"
 oggstream="vorbisenc quality=2 ! oggmux"
 usenero=""
+useoggenc=""
 stream=""
 extension=""
 albumart=""
@@ -15,7 +16,7 @@ albumart=""
 function VERSION ()
 {
     echo ${0/*\/}
-    echo "Version 2.0, Copyright Gavin Wood, 2010."
+    echo "Version 4.0, Copyright Gavin Wood, 2012."
     echo ""
     echo "${0/*\/} is Free Software. It is licenced under the GNU General"
     echo "Public Licence version 3. See http://www.gnu.org/licences for"
@@ -26,12 +27,13 @@ function USAGE ()
 {
     echo ""
     echo "USAGE: "
-    echo "    ${0/*\/} [-n|-s|-x|-a] <from> <to>"
+    echo "    ${0/*\/} [-n|-o|-s|-x|-a] <from> <to>"
     echo ""
     echo "OPTIONS:"
     echo "    -s <stream>    Specify custom gstreamer pipeline"
     echo "    -x <extension> Specify filename extension (default mp3)"
     echo "    -n             Use the Nero HE-AAC encoder (requires FLAC inputs for now)"
+    echo "    -o <quality>   Use the OggEnc encoder at given quality"
     echo "    -a <filename>  Specify album art filename (default cover.jpg)"
     echo "    <from>         Specify source path for files"
     echo "    <to>           Specify destination path for files"
@@ -44,10 +46,11 @@ function USAGE ()
     exit $E_OPTERROR    # Exit and explain usage, if no argument(s) given.
 }
 
-while getopts "ns:a:x:hv" Option
+while getopts "no:s:a:x:hv" Option
 do
     case $Option in
         n    ) usenero=1;;
+        o    ) useoggenc="$OPTARG";;
         a    ) albumart="$OPTARG";;
         x    ) extension="$OPTARG";;
         s    ) stream="$OPTARG";;
@@ -71,6 +74,8 @@ dest="$2"
 if [[ -z "$extension" ]]; then
 	if [[ -n "$usenero" ]]; then
 		extension=mp4
+	elif [[ -n "$useoggenc" ]]; then
+		extension=ogg
 	else
 		extension=mp3
 	fi
@@ -142,9 +147,14 @@ function unlock ()
 }
 
 cd $source
-printf "Searching..."
+printf "Searching...\r"
 
+declare -a wrongcount;
 declare -a missingart;
+declare -a paths;
+
+last="";
+count=0;
 
 lock 2> /dev/null
 while read s
@@ -160,16 +170,35 @@ do
 	fi
 	
 	path="${s%/*}"
-	if [[ -n "$albumart" ]] && [[ ! -e "$path/$albumart" ]]
+	npaths=${#paths[@]}
+	if [[ $npaths -lt 1 ]] || [[ "${paths[$(( npaths - 1 )) ]}" != "$path" ]]
 	then
-		entries=${#missingart[@]}
-		if [[ $entries -lt 1 ]] || [[ "${missingart[ $(( entries - 1 )) ]}" != "$path" ]]
+		if [[ $count -gt 0 && $(metaflac --export-tags-to=- "$last" | grep TRACKTOTAL | cut -d= -f2) -ne $count ]]
 		then
-			missingart[$entries]="$path"
+			wrongcount[${#wrongcount[@]}]="${last%/*}"
+		fi
+
+		paths[$npaths]="$path"
+		last="$s"
+		count=0
+		
+		if [[ -n "$albumart" ]] && [[ ! -e "$path/$albumart" ]]
+		then
+			missingart[${#missingart[@]}]="$path"
 		fi
 	fi
+	(( count++ ))
 done < <( find . -regextype posix-extended -iregex "$filter" )
 unlock
+
+if [[ ${#wrongcount[@]} -gt 0 ]]
+then
+	printf "\nMissing track(s) in:\n"
+	for m in "${wrongcount[@]}"
+	do
+		printf "%-*.*s\n" $((COLUMNS)) $((COLUMNS)) "$m"
+	done
+fi
 
 if [[ ${#missingart[@]} -gt 0 ]]
 then
@@ -177,6 +206,8 @@ then
 	for m in "${missingart[@]}"
 	do
 		printf "%-*.*s\n" $((COLUMNS)) $((COLUMNS)) "$m"
+		q="${m/*\/}" && q="${q/ \[?-?]}" && q="${q/ \[-]}"
+		[[ -x ~/getalbumart.php ]] && ~/getalbumart.php -q -r "${q/ - *}" -l "${q/* - }" -p "$m" -n ".x" && mv "$m"/.x.* "$m/$albumart"
 	done
 fi
 
@@ -190,7 +221,15 @@ dotd=""
 i=0
 while [[ 1 ]]
 do
-	[[ -n "$incoming" ]] && [[ -n "$d" ]] && mv "$incoming" "$d"
+	if [[ -n "$incoming" ]] && [[ -n "$d" ]]
+	then
+		if [[ -e "$incoming" ]]
+		then
+			mv "$incoming" "$d"
+		else
+			echo "***ERROR"
+		fi
+	fi
 	
 # START CRITICAL
 	lock 2>/dev/null
@@ -226,19 +265,27 @@ do
 		incoming="$dest/.incoming-$$.mp4"
 		mknod "/tmp/p-$$" p
 		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! audioconvert ! wavenc ! filesink "location=/tmp/p-$$" 1>/dev/null 2>/dev/null &
-		nice -n 19 neroAacEnc -q 0.3 -if "/tmp/p-$$" -of "$incoming" 1>/dev/null 2>/tmp/.sync-out-$$ && 
-		nice -n 19 metaflac --export-tags-to=- "$s" | while read tag
-		do
-			echo -n -
-			printf "meta-user:%s\0" "$tag"
-			n="${m/=*}"
-			v="${m/*=}"
-# Fix-ups for iTunes. UNTESTED
-			[[ "$n" == "compilation" ]] && echo -n - && printf "meta-user:itunescompilation=%s\0" "$v"
-			[[ "$n" == "tracktotal" ]] && echo -n - && printf "meta-user:totaltracks=%s\0" "$v"
-			[[ "$n" == "disctotal" ]] && echo -n - && printf "meta-user:totaldiscs=%s\0" "$v"
-		done | xargs -0 neroAacTag "$incoming" 1>/dev/null 2>/dev/null
+		nice -n 19 neroAacEnc -q 0.3 -if "/tmp/p-$$" -of "$incoming" 1>/dev/null 2>/tmp/.sync-out-$$;
+		if [[ -e "$incoming" ]] ; then
+			nice -n 19 metaflac --export-tags-to=- "$s" | while read tag
+			do
+				echo -n -
+				printf "meta-user:%s\0" "$tag"
+				n="${m/=*}"
+				v="${m/*=}"
+				# Fix-ups for iTunes. UNTESTED
+				[[ "$n" == "compilation" ]] && echo -n - && printf "meta-user:itunescompilation=%s\0" "$v"
+				[[ "$n" == "tracktotal" ]] && echo -n - && printf "meta-user:totaltracks=%s\0" "$v"
+				[[ "$n" == "disctotal" ]] && echo -n - && printf "meta-user:totaldiscs=%s\0" "$v"
+			done | xargs -0 neroAacTag "$incoming" 1>/dev/null 2>/dev/null
+		else
+			echo "PROBLEM:  "
+		fi
 		rm -f "/tmp/p-$$"
+	elif [[ -n "$useoggenc" ]]
+	then
+		incoming="$dest/.incoming-$$"	
+		nice -n 19 oggenc "$s" -o "$incoming" -q $useoggenc >/tmp/.sync-out-$$ 2>/dev/null
 	else
 		incoming="$dest/.incoming-$$"
 		nice -n 19 gst-launch filesrc "location=$s" ! decodebin ! audioconvert ! $stream ! id3v2mux ! filesink "location=$incoming" >/tmp/.sync-out-$$ 2>/dev/null
